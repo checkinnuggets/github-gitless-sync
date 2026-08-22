@@ -520,6 +520,13 @@ export default class SyncManager {
         {},
       );
 
+    // Tracks files we had to skip because the remote manifest and the actual
+    // remote tree disagreed on their existence (e.g. the file was deleted or
+    // renamed directly on GitHub, or a previous sync was interrupted before
+    // finishing). We surface these to the user instead of crashing the whole
+    // sync on a missing file.
+    const skippedFiles: string[] = [];
+
     await Promise.all(
       actions.map(async (action) => {
         switch (action.type) {
@@ -543,6 +550,17 @@ export default class SyncManager {
             break;
           }
           case "delete_remote": {
+            if (!newTreeFiles[action.filePath]) {
+              // The file is already missing from the remote tree, so there's
+              // nothing to delete. This can happen if the manifest is out of
+              // sync with the actual remote tree.
+              await this.logger.warn(
+                "Skipped delete_remote for file missing from remote tree",
+                { filePath: action.filePath },
+              );
+              skippedFiles.push(action.filePath);
+              break;
+            }
             newTreeFiles[action.filePath].sha = null;
             break;
           }
@@ -559,8 +577,21 @@ export default class SyncManager {
       ...actions
         .filter((action) => action.type === "download")
         .map(async (action: SyncAction) => {
+          const remoteFile = files[action.filePath];
+          if (!remoteFile) {
+            // The manifest says this file should be downloaded but it's not
+            // actually present in the remote tree. Skip it instead of
+            // crashing the whole sync, and let the user know which file was
+            // affected so they can investigate.
+            await this.logger.warn(
+              "Skipped download for file missing from remote tree",
+              { filePath: action.filePath },
+            );
+            skippedFiles.push(action.filePath);
+            return;
+          }
           await this.downloadFile(
-            files[action.filePath],
+            remoteFile,
             remoteMetadata.files[action.filePath].lastModified,
           );
         }),
@@ -572,6 +603,12 @@ export default class SyncManager {
     ]);
 
     await this.commitSync(newTreeFiles, treeSha, conflictResolutions);
+
+    if (skippedFiles.length > 0) {
+      const message = `Sync completed but skipped ${skippedFiles.length} file(s) out of sync with the remote repository: ${skippedFiles.join(", ")}`;
+      await this.logger.warn(message);
+      new Notice(message, 15000);
+    }
   }
 
   /**
