@@ -71,6 +71,14 @@ export default class EventsListener {
       return;
     }
 
+    if (!this.metadataStore.data.files[filePath]) {
+      // We have no record of this file, there's nothing to mark as deleted.
+      // This can happen if the file was moved/created outside of Obsidian's
+      // own rename flow (e.g. by an external tool) before we ever tracked it.
+      await this.logger.info("Skipped delete for untracked file", filePath);
+      return;
+    }
+
     this.metadataStore.data.files[filePath].deleted = true;
     this.metadataStore.data.files[filePath].deletedAt = Date.now();
     await this.metadataStore.save();
@@ -96,6 +104,25 @@ export default class EventsListener {
       await this.metadataStore.save();
       await this.logger.info(
         "Updated just downloaded modified file",
+        file.path,
+      );
+      return;
+    }
+    if (!data) {
+      // We have no record of this file, so start tracking it now instead of
+      // crashing. This can happen if the file was moved/created outside of
+      // Obsidian's own rename flow (e.g. by an external tool) before we ever
+      // tracked it.
+      this.metadataStore.data.files[file.path] = {
+        path: file.path,
+        sha: null,
+        dirty: true,
+        justDownloaded: false,
+        lastModified: Date.now(),
+      };
+      await this.metadataStore.save();
+      await this.logger.info(
+        "Started tracking previously untracked modified file",
         file.path,
       );
       return;
