@@ -405,6 +405,14 @@ export default class SyncManager {
       // Shown only if sync doesn't fail
       new Notice("Sync successful", 5000);
     } catch (err) {
+      // Log the full error with its stack trace so it's possible to debug
+      // from the DevTools console, since the Notice below only shows the
+      // message.
+      console.error("GitHub Sync: error syncing", err);
+      await this.logger.error("Error syncing", {
+        message: err?.message,
+        stack: err?.stack,
+      });
       // Show the error to the user, it's not automatically dismissed to make sure
       // the user sees it.
       new Notice(`Error syncing. ${err}`);
@@ -535,6 +543,25 @@ export default class SyncManager {
             const resolution = conflictResolutions.find(
               (c: ConflictResolution) => c.filePath === action.filePath,
             );
+            if (
+              !resolution &&
+              !(await this.vault.adapter.exists(normalizedPath))
+            ) {
+              // The file no longer exists locally (e.g. it was deleted after
+              // we decided to upload it). Skip it instead of crashing trying
+              // to read content that isn't there, and repair the metadata so
+              // future syncs treat it as deleted.
+              await this.logger.warn("Skipped upload for file missing locally", {
+                filePath: action.filePath,
+              });
+              const fileMetadata = this.metadataStore.data.files[action.filePath];
+              if (fileMetadata) {
+                fileMetadata.deleted = true;
+                fileMetadata.deletedAt = Date.now();
+              }
+              skippedFiles.push(action.filePath);
+              break;
+            }
             // If the file was conflicting we need to read the content from the
             // conflict resolution instead of reading it from file since at this point
             // we still have not updated the local file.
@@ -635,10 +662,30 @@ export default class SyncManager {
         }
         const remoteFile = filesMetadata[filePath];
         const localFile = this.metadataStore.data.files[filePath];
-        if (remoteFile.deleted && localFile.deleted) {
+        const actualLocalSHA = await this.calculateSHA(filePath);
+
+        if (actualLocalSHA === null && !localFile.deleted) {
+          // The file doesn't actually exist locally even though our metadata
+          // doesn't record it as deleted (e.g. it was removed without us
+          // capturing a delete event for it). Repair the metadata so it's
+          // treated as a deletion below, instead of a missing content
+          // conflict.
+          await this.logger.warn(
+            "Local file missing but not marked deleted, repairing metadata",
+            { filePath },
+          );
+          localFile.deleted = true;
+          localFile.deletedAt = Date.now();
+        }
+
+        if (remoteFile.deleted || localFile.deleted) {
+          // A deletion on either side isn't a content conflict - let
+          // determineSyncActions decide how to resolve it (download,
+          // delete_remote or delete_local) instead of asking the user to
+          // diff against content that may no longer exist on one side.
           return null;
         }
-        const actualLocalSHA = await this.calculateSHA(filePath);
+
         const remoteFileHasBeenModifiedSinceLastSync =
           remoteFile.sha !== localFile.sha;
         const localFileHasBeenModifiedSinceLastSync =
@@ -661,29 +708,44 @@ export default class SyncManager {
       }),
     );
 
-    return await Promise.all(
+    const conflictFiles = await Promise.all(
       conflicts
         .filter((filePath): filePath is string => filePath !== null)
-        .map(async (filePath: string) => {
-          // Load contents in parallel
-          const [remoteContent, localContent] = await Promise.all([
-            await (async () => {
-              const res = await this.client.getBlob({
-                sha: filesMetadata[filePath].sha!,
-                retry: true,
-                maxRetries: 1,
-              });
-              return decodeBase64String(res.content);
-            })(),
-            await this.vault.adapter.read(normalizePath(filePath)),
-          ]);
-          return {
-            filePath,
-            remoteContent,
-            localContent,
-          };
+        .map(async (filePath: string): Promise<ConflictFile | null> => {
+          try {
+            // Load contents in parallel
+            const [remoteContent, localContent] = await Promise.all([
+              await (async () => {
+                const res = await this.client.getBlob({
+                  sha: filesMetadata[filePath].sha!,
+                  retry: true,
+                  maxRetries: 1,
+                });
+                return decodeBase64String(res.content);
+              })(),
+              await this.vault.adapter.read(normalizePath(filePath)),
+            ]);
+            return {
+              filePath,
+              remoteContent,
+              localContent,
+            };
+          } catch (err) {
+            // The manifest's recorded blob SHA for this file is stale and no
+            // longer resolvable (e.g. the repo's history was rewritten), or
+            // the local file is no longer readable. We can't show a diff for
+            // content that isn't there - skip presenting it as a conflict
+            // and let determineSyncActions resolve it using the current
+            // state of the remote tree instead.
+            await this.logger.warn(
+              "Could not load conflict content, skipping conflict for file",
+              { filePath, error: err?.message },
+            );
+            return null;
+          }
         }),
     );
+    return conflictFiles.filter((c): c is ConflictFile => c !== null);
   }
 
   /**
@@ -723,6 +785,25 @@ export default class SyncManager {
         }
 
         const localSHA = await this.calculateSHA(filePath);
+
+        if (localSHA === null && !localFile.deleted) {
+          // The file doesn't actually exist locally even though our metadata
+          // doesn't record it as deleted (e.g. it was removed without us
+          // capturing a delete event for it). Repair the metadata now so we
+          // treat it as a deletion instead of later trying, and failing, to
+          // upload content that isn't there.
+          await this.logger.warn(
+            "Local file missing but not marked deleted, repairing metadata",
+            { filePath },
+          );
+          localFile.deleted = true;
+          localFile.deletedAt = Date.now();
+          if (remoteFile.deleted) {
+            // Both sides now agree the file is gone.
+            return;
+          }
+        }
+
         if (remoteFile.sha === localSHA) {
           // If the remote file sha is identical to the actual sha of the local file
           // there are no actions to take.

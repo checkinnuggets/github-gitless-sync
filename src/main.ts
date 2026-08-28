@@ -160,6 +160,10 @@ export default class GitHubSyncPlugin extends Plugin {
         // Shown only if sync doesn't fail
         new Notice("Sync successful", 5000);
       } catch (err) {
+        // Log the full error with its stack trace so it's possible to debug
+        // from the DevTools console, since the Notice below only shows the
+        // message.
+        console.error("GitHub Sync: error syncing", err);
         // Show the error to the user, it's not automatically dismissed to make sure
         // the user sees it.
         new Notice(`Error syncing. ${err}`);
