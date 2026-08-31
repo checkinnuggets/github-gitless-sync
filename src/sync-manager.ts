@@ -500,6 +500,7 @@ export default class SyncManager {
         remoteMetadata.files,
         this.metadataStore.data.files,
         conflictActions.map((action) => action.filePath),
+        files,
       )),
       ...conflictActions,
     ];
@@ -751,9 +752,10 @@ export default class SyncManager {
   /**
    * Determines which sync action to take for each file.
    *
-   * @param remoteFiles All files in the remote repo
+   * @param remoteFiles All files in the remote repo, according to the remote manifest
    * @param localFiles All files in the local vault
    * @param conflictFiles List of paths to files that have conflict with remote
+   * @param remoteTreeFiles All files actually present in the remote git tree right now
    *
    * @returns List of SyncActions
    */
@@ -761,6 +763,7 @@ export default class SyncManager {
     remoteFiles: { [key: string]: FileMetadata },
     localFiles: { [key: string]: FileMetadata },
     conflictFiles: string[],
+    remoteTreeFiles: { [key: string]: GetTreeResponseItem },
   ) {
     let actions: SyncAction[] = [];
 
@@ -779,6 +782,22 @@ export default class SyncManager {
 
         const remoteFile = remoteFiles[filePath];
         const localFile = localFiles[filePath];
+
+        if (!remoteFile.deleted && !(filePath in remoteTreeFiles)) {
+          // The manifest doesn't record this file as deleted, but it's not
+          // actually present in the live remote tree right now (e.g. it was
+          // removed directly on GitHub, or the repo's history was
+          // rewritten). The tree is the ground truth - treat it as deleted
+          // so it gets cleaned up locally, instead of assuming it's fine
+          // because the (stale) manifest and local metadata still agree.
+          await this.logger.warn(
+            "File missing from remote tree but not marked deleted in manifest, treating as deleted",
+            { filePath },
+          );
+          remoteFile.deleted = true;
+          remoteFile.deletedAt = remoteFile.lastModified;
+        }
+
         if (remoteFile.deleted && localFile.deleted) {
           // Nothing to do
           return;
@@ -804,42 +823,47 @@ export default class SyncManager {
           }
         }
 
-        if (remoteFile.sha === localSHA) {
-          // If the remote file sha is identical to the actual sha of the local file
-          // there are no actions to take.
+        if (
+          remoteFile.deleted === localFile.deleted &&
+          remoteFile.sha === localSHA
+        ) {
+          // If neither side is more deleted than the other, and the remote
+          // file sha is identical to the actual sha of the local file, there
+          // are no actions to take. We check the deleted flags here too,
+          // otherwise a file whose content hasn't changed since it was
+          // deleted on one side would never get its deletion propagated to
+          // the other, since the content shas still match.
           // We calculate the SHA at the moment instead of using the one stored in the
           // metadata file cause we update that only when the file is uploaded or downloaded.
           return;
         }
 
         if (remoteFile.deleted && !localFile.deleted) {
-          if ((remoteFile.deletedAt as number) > localFile.lastModified) {
+          // Favour the deletion on an exact tie rather than falling through
+          // to the content-comparison fallback below, which would propose
+          // downloading a file that (as far as we know) isn't deletable.
+          if ((remoteFile.deletedAt as number) >= localFile.lastModified) {
             actions.push({
               type: "delete_local",
               filePath: filePath,
             });
-            return;
-          } else if (
-            localFile.lastModified > (remoteFile.deletedAt as number)
-          ) {
+          } else {
             actions.push({ type: "upload", filePath: filePath });
-            return;
           }
+          return;
         }
 
         if (!remoteFile.deleted && localFile.deleted) {
-          if (remoteFile.lastModified > (localFile.deletedAt as number)) {
+          // Same tie-breaking as above, favouring the remote's state.
+          if (remoteFile.lastModified >= (localFile.deletedAt as number)) {
             actions.push({ type: "download", filePath: filePath });
-            return;
-          } else if (
-            (localFile.deletedAt as number) > remoteFile.lastModified
-          ) {
+          } else {
             actions.push({
               type: "delete_remote",
               filePath: filePath,
             });
-            return;
           }
+          return;
         }
 
         // For non-deletion cases, if SHAs differ, we just need to check if local changed.
@@ -855,22 +879,30 @@ export default class SyncManager {
     );
 
     // Get diff for files in remote but not in local
-    Object.keys(remoteFiles).forEach((filePath: string) => {
-      const remoteFile = remoteFiles[filePath];
-      const localFile = localFiles[filePath];
-      if (localFile) {
-        // Local file exists, we already handled it.
-        // Skip it.
-        return;
-      }
-      if (remoteFile.deleted) {
-        // Remote is deleted but we don't have it locally.
-        // Nothing to do.
-        // TODO: Maybe we need to remove remote reference too?
-      } else {
-        actions.push({ type: "download", filePath: filePath });
-      }
-    });
+    await Promise.all(
+      Object.keys(remoteFiles).map(async (filePath: string) => {
+        const remoteFile = remoteFiles[filePath];
+        const localFile = localFiles[filePath];
+        if (localFile) {
+          // Local file exists, we already handled it.
+          // Skip it.
+          return;
+        }
+        if (remoteFile.deleted || !(filePath in remoteTreeFiles)) {
+          // Remote is deleted (or missing from the live tree despite the
+          // manifest not marking it deleted - see the comment in the common
+          // files loop above) and we have no metadata for it locally, but a
+          // physical, untracked copy may still exist on disk (e.g. it
+          // predates the plugin tracking this file, or local metadata was
+          // reset). Remove it locally too instead of silently ignoring it.
+          if (await this.vault.adapter.exists(normalizePath(filePath))) {
+            actions.push({ type: "delete_local", filePath: filePath });
+          }
+        } else {
+          actions.push({ type: "download", filePath: filePath });
+        }
+      }),
+    );
 
     // Get diff for files in local but not in remote
     Object.keys(localFiles).forEach((filePath: string) => {
@@ -1075,6 +1107,18 @@ export default class SyncManager {
   async deleteLocalFile(filePath: string) {
     const normalizedPath = normalizePath(filePath);
     await this.vault.adapter.remove(normalizedPath);
+    if (!this.metadataStore.data.files[filePath]) {
+      // We had no metadata for this file (e.g. it was an untracked local
+      // copy of a file already deleted remotely). Create an entry so it's
+      // correctly recorded as deleted going forward.
+      this.metadataStore.data.files[filePath] = {
+        path: filePath,
+        sha: null,
+        dirty: false,
+        justDownloaded: false,
+        lastModified: Date.now(),
+      };
+    }
     this.metadataStore.data.files[filePath].deleted = true;
     this.metadataStore.data.files[filePath].deletedAt = Date.now();
     this.metadataStore.save();
