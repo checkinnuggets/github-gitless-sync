@@ -894,9 +894,36 @@ export default class SyncManager {
           // files loop above) and we have no metadata for it locally, but a
           // physical, untracked copy may still exist on disk (e.g. it
           // predates the plugin tracking this file, or local metadata was
-          // reset). Remove it locally too instead of silently ignoring it.
-          if (await this.vault.adapter.exists(normalizePath(filePath))) {
-            actions.push({ type: "delete_local", filePath: filePath });
+          // reset).
+          const normalizedPath = normalizePath(filePath);
+          const stat = await this.vault.adapter.stat(normalizedPath);
+          if (stat) {
+            // We have no tracked lastModified for this file, but its
+            // filesystem mtime lets us apply the same tie-breaking as
+            // tracked files: only remove it if it wasn't modified more
+            // recently than the remote last knew about this path, so a
+            // freshly (re)created file isn't silently deleted.
+            const remoteReferenceTime = (
+              remoteFile.deleted ? remoteFile.deletedAt : remoteFile.lastModified
+            ) as number;
+            if (remoteReferenceTime >= stat.mtime) {
+              actions.push({ type: "delete_local", filePath: filePath });
+            } else {
+              await this.logger.warn(
+                "Untracked local file is newer than the remote deletion, uploading instead of deleting",
+                { filePath },
+              );
+              // Start tracking it now - commitSync assumes every uploaded
+              // file already has a metadata entry to record its sha on.
+              this.metadataStore.data.files[filePath] = {
+                path: filePath,
+                sha: null,
+                dirty: true,
+                justDownloaded: false,
+                lastModified: stat.mtime,
+              };
+              actions.push({ type: "upload", filePath: filePath });
+            }
           }
         } else {
           actions.push({ type: "download", filePath: filePath });
