@@ -1,11 +1,11 @@
 {
-  "id": "github-gitless-sync",
-  "name": "GitHub Gitless Sync",
-  "version": "1.0.7",
+  "id": "github-gitless-sync-cn",
+  "name": "GitHub Gitless Sync (CN fork)",
+  "version": "0.0.1-fixes",
   "minAppVersion": "1.7.7",
-  "description": "Sync a GitHub repository with vaults on different platforms without requiring git installation",
-  "author": "Silvano Cerza",
-  "authorUrl": "https://silvanocerza.com",
+  "description": "Fork of GitHub Gitless Sync with unreleased bug fixes. Not affiliated with or endorsed by the original author.",
+  "author": "Silvano Cerza, fork by @checkinnuggets",
+  "authorUrl": "https://github.com/checkinnuggets/github-gitless-sync",
   "fundingUrl": "https://ko-fi.com/silvanocerza",
   "isDesktopOnly": false
 }
