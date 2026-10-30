@@ -292,6 +292,19 @@ export default class SyncManager {
         ) => ({ ...acc, [item.path]: item }),
         {},
       );
+    // Files that were tracked locally but deleted before they ever reached the
+    // remote have nothing to upload or delete, so just stop tracking them.
+    // Trying to read them below would fail since they're not on disk anymore.
+    Object.keys(this.metadataStore.data.files)
+      .filter((filePath: string) => {
+        return (
+          !Object.keys(files).contains(filePath) &&
+          this.metadataStore.data.files[filePath].deleted
+        );
+      })
+      .forEach((filePath: string) => {
+        delete this.metadataStore.data.files[filePath];
+      });
     // Add files that are in the manifest but not in the tree.
     await Promise.all(
       Object.keys(this.metadataStore.data.files)
