@@ -292,19 +292,27 @@ export default class SyncManager {
         ) => ({ ...acc, [item.path]: item }),
         {},
       );
-    // Files that were tracked locally but deleted before they ever reached the
+    // Files that were tracked locally but are gone before they ever reached the
     // remote have nothing to upload or delete, so just stop tracking them.
     // Trying to read them below would fail since they're not on disk anymore.
-    Object.keys(this.metadataStore.data.files)
-      .filter((filePath: string) => {
-        return (
-          !Object.keys(files).contains(filePath) &&
-          this.metadataStore.data.files[filePath].deleted
-        );
-      })
-      .forEach((filePath: string) => {
-        delete this.metadataStore.data.files[filePath];
-      });
+    // We check the disk rather than the deleted flag because some files, like
+    // hidden ones (e.g. .DS_Store), can disappear without Obsidian sending us
+    // a delete event for them.
+    await Promise.all(
+      Object.keys(this.metadataStore.data.files)
+        .filter((filePath: string) => {
+          return !Object.keys(files).contains(filePath);
+        })
+        .map(async (filePath: string) => {
+          const exists = await this.vault.adapter.exists(
+            normalizePath(filePath),
+          );
+          if (!exists) {
+            await this.logger.info("Dropping missing untracked file", filePath);
+            delete this.metadataStore.data.files[filePath];
+          }
+        }),
+    );
     // Add files that are in the manifest but not in the tree.
     await Promise.all(
       Object.keys(this.metadataStore.data.files)
