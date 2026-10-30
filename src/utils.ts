@@ -65,6 +65,26 @@ export function hasTextExtension(filePath: string) {
 }
 
 /**
+ * Checks if a path is hidden, meaning the file or any folder in its path
+ * starts with a dot (e.g. .DS_Store or .trash/note.md).
+ * The config dir is not considered hidden even though it starts with a dot.
+ *
+ * Obsidian doesn't send events for hidden files, so we can't track them
+ * reliably and must never sync them.
+ *
+ * @param filePath The path of the file or folder to check
+ * @param configDir The vault config dir, usually .obsidian
+ * @returns True if the path is hidden, false otherwise
+ */
+export function isHiddenPath(filePath: string, configDir: string) {
+  const parts = filePath.split("/");
+  if (parts[0] === configDir) {
+    parts.shift();
+  }
+  return parts.some((part) => part.startsWith("."));
+}
+
+/**
  * Retries an async function until its return value satisfies a condition or max retries is reached.
  * Uses exponential backoff between retry attempts.
  *

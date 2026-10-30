@@ -18,7 +18,7 @@ import MetadataStore, {
 import EventsListener from "./events-listener";
 import { GitHubSyncSettings } from "./settings/settings";
 import Logger, { LOG_FILE_NAME } from "./logger";
-import { decodeBase64String, hasTextExtension } from "./utils";
+import { decodeBase64String, hasTextExtension, isHiddenPath } from "./utils";
 import GitHubSyncPlugin from "./main";
 import { BlobReader, Entry, Uint8ArrayWriter, ZipReader } from "@zip.js/zip.js";
 
@@ -241,7 +241,7 @@ export default class SyncManager {
           return;
         }
 
-        if (targetPath.split("/").last()?.startsWith(".")) {
+        if (isHiddenPath(targetPath, this.vault.configDir)) {
           // We must skip hidden files as that creates issues with syncing.
           // This is fine as users can't edit hidden files in Obsidian anyway.
           await this.logger.info("Skipping hidden file", targetPath);
@@ -969,6 +969,13 @@ export default class SyncManager {
       }
     });
 
+    // Hidden files can't be tracked reliably as Obsidian sends no events for
+    // them, so never sync them even if they ended up in either manifest.
+    actions = actions.filter(
+      (action: SyncAction) =>
+        !isHiddenPath(action.filePath, this.vault.configDir),
+    );
+
     if (!this.settings.syncConfigDir) {
       // Remove all actions that involve the config directory if the user doesn't want to sync it.
       // The manifest file is always synced.
@@ -1189,11 +1196,19 @@ export default class SyncManager {
           // Skip the config dir if the user doesn't want to sync it
           continue;
         }
+        if (isHiddenPath(folder, this.vault.configDir)) {
+          // Hidden folders like .trash can't be tracked reliably, skip them
+          continue;
+        }
         const res = await this.vault.adapter.list(folder);
         files.push(...res.files);
         folders.push(...res.folders);
       }
       files.forEach((filePath: string) => {
+        if (isHiddenPath(filePath, this.vault.configDir)) {
+          // Hidden files like .DS_Store can't be tracked reliably, skip them
+          return;
+        }
         if (filePath === `${this.vault.configDir}/workspace.json`) {
           // Obsidian recommends not syncing the workspace file
           return;
