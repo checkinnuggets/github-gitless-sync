@@ -1,7 +1,7 @@
 {
   "id": "github-gitless-sync-cn",
   "name": "GitHub Gitless Sync (CN fork)",
-  "version": "0.0.2-fixes",
+  "version": "0.0.3-fixes",
   "minAppVersion": "1.7.7",
   "description": "Fork of GitHub Gitless Sync with unreleased bug fixes. Not affiliated with or endorsed by the original author.",
   "author": "Silvano Cerza, fork by @checkinnuggets",
