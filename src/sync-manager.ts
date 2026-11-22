@@ -216,7 +216,7 @@ export default class SyncManager {
         }
 
         if (
-          this.settings.syncConfigDir &&
+          !this.settings.syncConfigDir &&
           targetPath.startsWith(this.vault.configDir) &&
           targetPath !== `${this.vault.configDir}/${MANIFEST_FILE_NAME}`
         ) {
