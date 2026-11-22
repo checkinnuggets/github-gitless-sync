@@ -682,6 +682,19 @@ export default class SyncManager {
           // handle conflicts for this
           return null;
         }
+        if (
+          !this.settings.syncConfigDir &&
+          filePath.startsWith(this.vault.configDir)
+        ) {
+          // Config files are not synced if the user doesn't want to, so
+          // there's nothing to conflict on. They might still be tracked
+          // if they were synced in the past.
+          return null;
+        }
+        if (isHiddenPath(filePath, this.vault.configDir)) {
+          // Hidden files are never synced, see determineSyncActions
+          return null;
+        }
         const remoteFile = filesMetadata[filePath];
         const localFile = this.metadataStore.data.files[filePath];
         const actualLocalSHA = await this.calculateSHA(filePath);
